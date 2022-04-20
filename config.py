@@ -1,0 +1,6 @@
+VK_TOKEN = ""
+VK_GROUP_ID = 0
+
+DISCORD_TOKEN = ""
+
+TELEGRAM_TOKEN = ""
