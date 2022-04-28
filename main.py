@@ -91,11 +91,57 @@ class Graph:
             self.__add_operation_to_storage("-", vertex1, vertex2)
 
 
+class Message:
+    def __init__(self, from_id, text, author_name, chat_name):
+        self.from_id = from_id
+        self.text = text
+        self.author_name = author_name
+        self.chat_name = chat_name
+
+    def is_command(self):
+        return len(self.text) > 0 and self.text[0] == "!"
+
+    def get_command(self):
+        if not self.is_command():
+            return None
+        return self.text[1:].strip().lower()
+
+    def get_text_to_forwarding(self):
+        description = ""
+        if self.chat_name != None:
+            description += " [" + self.chat_name + "]"
+        if self.author_name != None:
+            description += ", " + self.author_name
+        if self.chat_name != None or self.author_name != None:
+            description = self.from_id[1] + description + ":\n"
+        return description + self.text
+
+
 class VkClient:
     def __init__(self):
         self.vk_client = None
         self.group_id = None
         self.handler_thread = None
+
+    def __get_user(self, id):
+        return self.vk_client.method("users.get", {"user_ids": id})[0]
+
+    def __get_chat(self, id):
+        chat = self.vk_client.method("messages.getConversationsById", {"peer_ids": id + 2000000000})
+        if chat["count"] == 0:
+            return {"chat_settings": {"title": None}}
+        return chat["items"][0]
+
+    def __handler(self):
+        longpoll = VkBotLongPoll(self.vk_client, self.group_id)
+
+        for event in longpoll.listen():
+            if event.type == VkBotEventType.MESSAGE_NEW and event.from_chat:
+                author = self.__get_user(event.object["message"]["from_id"])
+                author_name = author["last_name"] + " " + author["first_name"]
+                chat = self.__get_chat(event.chat_id)
+                chat_name = chat["chat_settings"]["title"]
+                compute_message(Message((event.chat_id, "VK"), event.object["message"]["text"], author_name, chat_name))
 
     def send_msg(self, id, text):
         self.vk_client.method("messages.send", {"chat_id": id, "message": text, "random_id": 0})
@@ -103,15 +149,8 @@ class VkClient:
     def run(self, token, group_id):
         self.vk_client = vk_api.VkApi(token=token)
         self.group_id = group_id
-        self.handler_thread = threading.Thread(target=self.handler)
+        self.handler_thread = threading.Thread(target=self.__handler)
         self.handler_thread.start()
-
-    def handler(self):
-        longpoll = VkBotLongPoll(self.vk_client, self.group_id)
-
-        for event in longpoll.listen():
-            if event.type == VkBotEventType.MESSAGE_NEW and event.from_chat:
-                compute_message((event.chat_id, "VK"), event.object["message"]["text"])
 
 
 class TelegramClient:
@@ -119,29 +158,33 @@ class TelegramClient:
         self.telegram_client = None
         self.handler_thread = None
 
+    def __handler(self):
+        @self.telegram_client.message_handler(content_types=["text"])
+        def on_message(message):
+            author_name = message.from_user.last_name + " " + message.from_user.first_name
+            chat_name = message.chat.title
+            compute_message(Message((message.chat.id, "TG"), message.text, author_name, chat_name))
+
+        self.telegram_client.infinity_polling()
+
     def send_msg(self, id, text):
         self.telegram_client.send_message(id, text)
 
     def run(self, token):
         self.telegram_client = telebot.TeleBot(token)
-        self.handler_thread = threading.Thread(target=self.handler)
+        self.handler_thread = threading.Thread(target=self.__handler)
         self.handler_thread.start()
-
-    def handler(self):
-        @self.telegram_client.message_handler(content_types=["text"])
-        def on_message(message):
-            compute_message((message.chat.id, "TG"), message.text)
-
-        self.telegram_client.infinity_polling()
 
 
 class DiscordClient(discord.Client):
-    def send_msg(self, id, text):
-        self.loop.create_task(discord_client.get_channel(id).send(text))
-
     async def on_message(self, message):
         if message.author != self.user:
-            compute_message((message.channel.id, "DS"), message.content)
+            author_name = message.author.name
+            chat_name = message.author.guild.name + "/" + message.channel.name
+            compute_message(Message((message.channel.id, "DS"), message.content, author_name, chat_name))
+
+    def send_msg(self, id, text):
+        self.loop.create_task(discord_client.get_channel(id).send(text))
 
 
 def add_error_to_log(text):
@@ -164,72 +207,75 @@ def send(id, text):
         add_error_to_log("Error: Unknown error while sending the message.\nDescription:\n" + str(error))
 
 
-def compute_command_select(id):
-    global select_id
+def compute_command_select(msg):
+    global select_chat
 
-    select_id = id
-    send(id, "Chat is selected.")
+    select_chat["chat_id"] = msg.from_id
+    select_chat["chat_name"] = msg.chat_name
+    send(msg.from_id, "Chat is selected.")
 
 
-def compute_command_connect(id):
-    global graph, select_id
+def compute_command_connect(msg):
+    global graph, select_chat
 
-    if select_id[0] == -1:
-        send(id, "Error: No selected chat.")
-    elif select_id == id:
-        send(id, "Error: Attempting to connect a chat with itself.")
-    elif select_id in graph.adjacency_list[id]:
-        send(id, "Error: Chats already connected.")
+    select_id = select_chat["chat_id"]
+    if select_id == (None, None):
+        send(msg.from_id, "Error: No selected chat.")
+    elif select_id == msg.from_id:
+        send(msg.from_id, "Error: Attempting to connect a chat with itself.")
+    elif select_id in graph.adjacency_list[msg.from_id]:
+        send(msg.from_id, "Error: Chats already connected.")
     else:
-        graph.add_edge(id, select_id)
-        send(id, select_id[1] + " chat with id " + str(select_id[0]) + " is connected.")
-        send(select_id, id[1] + " chat with id " + str(id[0]) + " is connected.")
+        graph.add_edge(msg.from_id, select_id)
+        send(msg.from_id, select_id[1] + " chat with name " + select_chat["chat_name"] + " is connected.")
+        send(select_id, msg.from_id[1] + " chat with name " + msg.chat_name + " is connected.")
 
 
-def compute_command_disconnect(id):
-    global graph, select_id
+def compute_command_disconnect(msg):
+    global graph, select_chat
 
-    if select_id[0] == -1:
-        send(id, "Error: No selected chat.")
-    elif not (select_id in graph.adjacency_list[id]):
-        send(id, "Error: Chats are not connected.")
+    select_id = select_chat["chat_id"]
+    if select_id == (None, None):
+        send(msg.from_id, "Error: No selected chat.")
+    elif not (select_id in graph.adjacency_list[msg.from_id]):
+        send(msg.from_id, "Error: Chats are not connected.")
     else:
-        graph.erase_edge(id, select_id)
-        send(id, select_id[1] + " chat with id " + str(select_id[0]) + " is disconnected.")
-        send(select_id, id[1] + " chat with id " + str(id[0]) + " is disconnected.")
+        graph.erase_edge(msg.from_id, select_id)
+        send(msg.from_id, select_id[1] + " chat with name " + select_chat["chat_name"] + " is disconnected.")
+        send(select_id, msg.from_id[1] + " chat with name " + msg.chat_name + " is disconnected.")
 
 
-def compute_command(id, command):
-    command = command.lower()
+def compute_command(msg):
+    command = msg.get_command()
     if command == "select":
-        compute_command_select(id)
+        compute_command_select(msg)
     elif command == "connect":
-        compute_command_connect(id)
+        compute_command_connect(msg)
     elif command == "disconnect":
-        compute_command_disconnect(id)
+        compute_command_disconnect(msg)
     else:
-        send(id, "Error: Unknown instruction.")
+        send(msg.from_id, "Error: Unknown instruction.")
 
 
-def compute_message(id, msg):
+def compute_message(msg):
     global graph
 
-    if len(msg) == 0:
+    if msg.text == "":
         return None
 
-    graph.add_vertex(id)
-    if msg[0] == "!":
-        return compute_command(id, msg[1:].strip())
+    graph.add_vertex(msg.from_id)
+    if msg.is_command():
+        return compute_command(msg)
 
-    for send_id in graph.get_reachable_vertices(id):
-        send(send_id, msg)
+    for send_id in graph.get_reachable_vertices(msg.from_id):
+        send(send_id, msg.get_text_to_forwarding())
 
 
 def main():
-    global graph, select_id, vk_client, discord_client, telegram_client
+    global graph, select_chat, vk_client, discord_client, telegram_client
 
     graph = Graph(config.GRAPH_STORAGE_NAME)
-    select_id = (-1, "??")
+    select_chat = {"chat_name": None, "chat_id": (None, None)}
 
     vk_client = VkClient()
     discord_client = DiscordClient()
