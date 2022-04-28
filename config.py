@@ -4,3 +4,6 @@ VK_GROUP_ID = 0
 DISCORD_TOKEN = ""
 
 TELEGRAM_TOKEN = ""
+
+GRAPH_STORAGE_NAME = "graph.txt"
+ERROR_LOG_NAME = "error_log.txt"
