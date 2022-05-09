@@ -12,11 +12,17 @@ class TelegramClient:
     def __handler(self):
         @self.client.message_handler(content_types=["text"])
         def on_message(message):
+            from_id = message.chat.id
+            text = message.text
+            author_id = message.from_user.id
+            author = self.client.get_chat_member(from_id, author_id)
             author_name = message.from_user.last_name + " " + message.from_user.first_name
-            chat_name = None
-            if message.from_user.id != message.chat.id:
+            if from_id != author_id:
                 chat_name = message.chat.title
-            self.compute_massage(Message((message.chat.id, "TG"), message.text, message.from_user.id, author_name, chat_name))
+                is_owner = author.status == "creator"
+                self.compute_massage(Message((from_id, "TG"), text, author_id, author_name, chat_name=chat_name, is_owner=is_owner))
+            else:
+                self.compute_massage(Message((from_id, "TG"), text, author_id, author_name))
 
         self.client.infinity_polling()
 

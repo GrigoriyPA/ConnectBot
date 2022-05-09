@@ -28,15 +28,19 @@ class VkClient:
 
         for event in longpoll.listen():
             if event.type == VkBotEventType.MESSAGE_NEW:
+                text = event.object["message"]["text"]
                 author = self.__get_user(event.object["message"]["from_id"])
+                author_id = event.object["message"]["from_id"]
                 author_name = author["last_name"] + " " + author["first_name"]
-                chat_id = event.object["message"]["from_id"]
-                chat_name = None
                 if event.from_chat:
-                    chat_id = event.chat_id
+                    from_id = event.chat_id
                     chat = self.__get_chat(event.chat_id)
                     chat_name = chat["chat_settings"]["title"]
-                self.compute_massage(Message((chat_id, "VK"), event.object["message"]["text"], event.object["message"]["from_id"], author_name, chat_name))
+                    is_owner = author_id == chat["chat_settings"]["owner_id"]
+                    self.compute_massage(Message((from_id, "VK"), text, author_id, author_name, chat_name=chat_name, is_owner=is_owner))
+                else:
+                    from_id = event.object["message"]["from_id"]
+                    self.compute_massage(Message((from_id, "VK"), text, author_id, author_name))
 
     def send_msg(self, id, text, to_chat):
         if to_chat:
