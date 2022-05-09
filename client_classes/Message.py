@@ -17,9 +17,6 @@ class Message:
             return None
         return self.text[1:].strip().lower()
 
-    def get_user_command(self):
-        return self.text.split(" ")
-
     def get_text_to_forwarding(self):
         description = ""
         if self.author_name is not None:

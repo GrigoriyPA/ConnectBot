@@ -125,7 +125,7 @@ class UsersHandler:
         if self.__is_login(msg):
             return self.__send(msg.from_id, "To create a new account, you must log out of your current account.", to_chat=False)
 
-        command = msg.get_user_command()
+        command = msg.text.split()
         if len(command) == 1:
             return self.__send(msg.from_id, "Error: To create an account, you need to provide an account name.", to_chat=False)
         name = " ".join(command[1:])
@@ -149,7 +149,7 @@ class UsersHandler:
         if self.__is_login(msg):
             return self.__send(msg.from_id, "To login, you must log out of your current account.", to_chat=False)
 
-        command = msg.get_user_command()
+        command = msg.text.split()
         if len(command) == 1:
             return self.__send(msg.from_id, "Error: To enter an account, you need to provide a token.", to_chat=False)
         if len(command) == 2:
@@ -198,7 +198,7 @@ class UsersHandler:
         if not self.__is_login(msg):
             return self.__send(msg.from_id, "Error: Your account has not been logged in.", to_chat=False)
 
-        command = msg.get_user_command()
+        command = msg.text.split()
         if len(command) == 1:
             return self.__send(msg.from_id, "Error: To rename an account, you need to provide an new account name.", to_chat=False)
         name = " ".join(command[1:])
@@ -258,7 +258,7 @@ class UsersHandler:
 
     def __compute_user_command(self, msg):
         self.__add_user(msg)
-        command = msg.get_user_command()
+        command = msg.text.split()
         if len(command) >= 1 and command[0].lower() == "create":
             self.__compute_command_create(msg)
         elif len(command) >= 1 and command[0].lower() == "login":

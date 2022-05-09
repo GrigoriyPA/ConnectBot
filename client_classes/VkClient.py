@@ -11,11 +11,14 @@ class VkClient:
         self.handler_thread = None
         self.compute_massage = compute_message_func
 
+    def __get_peer_id_by_id(self, id):
+        return id + 2000000000
+
     def __get_user(self, id):
         return self.client.method("users.get", {"user_ids": id})[0]
 
     def __get_chat(self, id):
-        chat = self.client.method("messages.getConversationsById", {"peer_ids": id + 2000000000})
+        chat = self.client.method("messages.getConversationsById", {"peer_ids": self.__get_peer_id_by_id(id)})
         if chat["count"] == 0:
             return {"chat_settings": {"title": "NULL"}}
         return chat["items"][0]
