@@ -1,7 +1,4 @@
-import threading
 import sqlite3
-import hashlib
-import random
 from main_classes.Graph import Graph
 from client_classes.VkClient import VkClient
 from client_classes.TelegramClient import TelegramClient
@@ -9,11 +6,11 @@ from client_classes.DiscordClient import DiscordClient
 
 
 class UsersHandler:
-    def __init__(self, graph_storage_name, users_information_db_name, token_length=1, error_log_name=None):
+    def __init__(self, graph_storage_name, users_information_db_name, error_log_name=None):
         self.error_log_name = error_log_name
         self.graph = Graph(graph_storage_name)
         self.select_chat = {"chat_name": None, "chat_id": (None, None)}
-        self.token_length = token_length
+        self.orient = False
 
         self.vk_client = VkClient(self.compute_message)
         self.discord_client = DiscordClient(self.compute_message)
@@ -22,56 +19,37 @@ class UsersHandler:
         self.users_information_db_name = users_information_db_name
         conn = sqlite3.connect(users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY, account_id INT);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS names(name TEXT PRIMARY KEY, account_id INT);")
-        cursor.execute("CREATE TABLE IF NOT EXISTS accounts(account_id INT PRIMARY KEY, name TEXT, token TEXT, count INT);")
+        cursor.execute("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT, is_admin INT);")
+        cursor.execute("CREATE TABLE IF NOT EXISTS chat_rules(id TEXT PRIMARY KEY, rule TEXT);")
         conn.commit()
 
-        self.free_id = 0
-        cursor.execute("SELECT * FROM accounts;")
-        for account in cursor.fetchall():
-            self.free_id = max(self.free_id, account[0] + 1)
+        cursor.execute("SELECT * FROM chat_rules;")
+        for rule in cursor.fetchall():
+            self.graph.set_rule(rule[0], rule[1])
 
-    def __create_token(self):
-        token = ""
-        for i in range(self.token_length):
-            cur = random.randint(0, 63)
-            if cur <= 9:
-                token += str(cur)
-            elif cur <= 35:
-                token += chr(ord("a") + cur - 10)
-            elif cur <= 61:
-                token += chr(ord("A") + cur - 36)
-            elif cur == 62:
-                token += "_"
-            else:
-                token += "-"
-        return token
-
-    def __add_user(self, msg):
+    def __add_user(self, id):
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
+        cursor.execute("SELECT * FROM users WHERE id='" + id + "';")
         if cursor.fetchone() is None:
-            entry = (msg.get_author_id(), -1)
-            cursor.execute("INSERT INTO users VALUES(?, ?);", entry)
+            entry = (id, "None", 0)
+            cursor.execute("INSERT INTO users VALUES(?, ?, ?);", entry)
             conn.commit()
 
     def __get_user_name(self, msg):
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        info = cursor.fetchone()
-        if info[1] == -1:
-            return None
-        cursor.execute("SELECT * FROM accounts WHERE account_id=" + str(info[1]) + ";")
+        cursor.execute("SELECT * FROM users WHERE id='" + msg.get_author_id() + str(msg.from_id[0]) + "';")
         return cursor.fetchone()[1]
 
-    def __is_login(self, msg):
+    def __is_admin(self, msg):
+        if msg.is_owner:
+            return True
+
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        return cursor.fetchone()[1] != -1
+        cursor.execute("SELECT * FROM users WHERE id='" + msg.get_author_id() + str(msg.from_id[0]) + "';")
+        return cursor.fetchone()[2]
 
     def __add_error_to_log(self, text):
         if self.error_log_name is not None:
@@ -79,25 +57,39 @@ class UsersHandler:
             error_log.write(text + "\n\n")
             error_log.close()
 
-    def __send(self, id, text, to_chat=True):
+    def __send(self, id, text, to_chat=True, photo=[]):
         try:
             if id[1] == "VK":
-                self.vk_client.send_msg(id[0], text, to_chat)
+                self.vk_client.send_msg(id[0], text, photo, to_chat)
             elif id[1] == "DS":
-                self.discord_client.send_msg(id[0], text)
+                self.discord_client.send_msg(id[0], text, photo)
             elif id[1] == "TG":
-                self.telegram_client.send_msg(id[0], text)
+                self.telegram_client.send_msg(id[0], text, photo)
             else:
                 self.__add_error_to_log("Error: Unknown system to send message.")
         except Exception as error:
             self.__add_error_to_log("Error: Unknown error while sending the message.\nDescription:\n" + str(error))
 
+    def __compute_command_orient(self, msg):
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
+
+        self.orient = True
+        self.__send(msg.from_id, "All new connections from this chat will be oriented.")
+
     def __compute_command_select(self, msg):
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
+
+        self.orient = False
         self.select_chat["chat_id"] = msg.from_id
         self.select_chat["chat_name"] = msg.chat_name
         self.__send(msg.from_id, "Chat is selected.")
 
     def __compute_command_connect(self, msg):
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
+
         select_id = self.select_chat["chat_id"]
         if select_id == (None, None):
             self.__send(msg.from_id, "Error: No selected chat.")
@@ -106,11 +98,16 @@ class UsersHandler:
         elif select_id in self.graph.adjacency_list[msg.from_id]:
             self.__send(msg.from_id, "Error: Chats already connected.")
         else:
-            self.graph.add_edge(msg.from_id, select_id)
+            self.graph.add_edge(select_id, msg.from_id)
+            if not self.orient:
+                self.graph.add_edge(msg.from_id, select_id)
             self.__send(msg.from_id, select_id[1] + " chat with name " + self.select_chat["chat_name"] + " is connected.")
             self.__send(select_id, msg.from_id[1] + " chat with name " + msg.chat_name + " is connected.")
 
     def __compute_command_disconnect(self, msg):
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
+
         select_id = self.select_chat["chat_id"]
         if select_id == (None, None):
             self.__send(msg.from_id, "Error: No selected chat.")
@@ -121,156 +118,117 @@ class UsersHandler:
             self.__send(msg.from_id, select_id[1] + " chat with name " + self.select_chat["chat_name"] + " is disconnected.")
             self.__send(select_id, msg.from_id[1] + " chat with name " + msg.chat_name + " is disconnected.")
 
-    def __compute_command_create(self, msg):
-        if self.__is_login(msg):
-            return self.__send(msg.from_id, "To create a new account, you must log out of your current account.", to_chat=False)
+    def __compute_command_get_id(self, msg):
+        self.__send(msg.from_id, "User id: " + msg.get_author_id(), to_chat=msg.chat_name is not None)
 
-        command = msg.text.split()
-        if len(command) == 1:
-            return self.__send(msg.from_id, "Error: To create an account, you need to provide an account name.", to_chat=False)
-        name = " ".join(command[1:])
+    def __compute_command_set_admin(self, msg):
+        if not msg.is_owner:
+            return self.__send(msg.from_id, "Error: You must be an owner to use this command.")
 
-        conn = sqlite3.connect(self.users_information_db_name)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM names WHERE name='" + name + "';")
-        if cursor.fetchone() is not None:
-            return self.__send(msg.from_id, "Error: An account with the name '" + name + "' already exists.", to_chat=False)
-
-        cursor.execute("UPDATE users SET account_id=" + str(self.free_id) + " WHERE user_id='" + msg.get_author_id() + "';")
-        entry = (name, self.free_id)
-        cursor.execute("INSERT INTO names VALUES(?, ?);", entry)
-        entry = (self.free_id, name, "?", 1)
-        cursor.execute("INSERT INTO accounts VALUES(?, ?, ?, ?);", entry)
-        conn.commit()
-        self.free_id += 1
-        self.__send(msg.from_id, "An account with the name '" + name + "' has been created.", to_chat=False)
-
-    def __compute_command_login(self, msg):
-        if self.__is_login(msg):
-            return self.__send(msg.from_id, "To login, you must log out of your current account.", to_chat=False)
-
-        command = msg.text.split()
-        if len(command) == 1:
-            return self.__send(msg.from_id, "Error: To enter an account, you need to provide a token.", to_chat=False)
+        command = msg.get_chat_command().split()
         if len(command) == 2:
-            return self.__send(msg.from_id, "Error: To enter an account, you need to provide an account name.", to_chat=False)
-        token = command[1]
-        name = " ".join(command[2:])
+            return self.__send(msg.from_id, "Error: An user id is required.")
+        user_id = " ".join(command[2:])
+        self.__add_user(user_id + str(msg.from_id[0]))
 
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM names WHERE name='" + name + "';")
-        names_info = cursor.fetchone()
-        if names_info is None:
-            return self.__send(msg.from_id, "Error: There is no account with the name '" + name + "'.", to_chat=False)
-        cursor.execute("SELECT * FROM accounts WHERE account_id=" + str(names_info[1]) + ";")
-        account_info = cursor.fetchone()
-        if account_info[2] == "?" or account_info[2] != hashlib.sha512(token.encode()).hexdigest():
-            return self.__send(msg.from_id, "Error: Incorrect token.", to_chat=False)
+        cursor.execute("SELECT * FROM users WHERE id='" + user_id + str(msg.from_id[0]) + "';")
+        if cursor.fetchone()[2]:
+            return self.__send(msg.from_id, "Error: The account with id '" + user_id + "' already has administrator rights.")
 
-        cursor.execute("UPDATE users SET account_id=" + str(account_info[0]) + " WHERE user_id='" + msg.get_author_id() + "';")
-        cursor.execute("UPDATE accounts SET count=" + str(account_info[3] + 1) + " WHERE account_id=" + str(account_info[0]) + ";")
+        cursor.execute("UPDATE users SET is_admin=1 WHERE id='" + user_id + str(msg.from_id[0]) + "';")
         conn.commit()
-        self.__send(msg.from_id, "You are connected to the '" + name + "' account.", to_chat=False)
+        self.__send(msg.from_id, "The account with id '" + user_id + "' has been granted administrative rights.")
 
-    def __compute_command_logout(self, msg):
-        if not self.__is_login(msg):
-            return self.__send(msg.from_id, "Error: Your account has not been logged in.", to_chat=False)
+    def __compute_command_delete_admin(self, msg):
+        if not msg.is_owner:
+            return self.__send(msg.from_id, "Error: You must be an owner to use this command.")
+
+        command = msg.get_chat_command().split()
+        if len(command) == 2:
+            return self.__send(msg.from_id, "Error: An user id is required.")
+        user_id = " ".join(command[2:])
+        self.__add_user(user_id + str(msg.from_id[0]))
 
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        user_info = cursor.fetchone()
-        cursor.execute("SELECT * FROM accounts WHERE account_id=" + str(user_info[1]) + ";")
-        account_info = cursor.fetchone()
+        cursor.execute("SELECT * FROM users WHERE id='" + user_id + str(msg.from_id[0]) + "';")
+        if not cursor.fetchone()[2]:
+            return self.__send(msg.from_id, "Error: The account with id '" + user_id + "' does not have administrative rights.")
 
-        cursor.execute("UPDATE users SET account_id=-1 WHERE user_id='" + msg.get_author_id() + "';")
-        cursor.execute("UPDATE accounts SET count=" + str(account_info[3] - 1) + " WHERE account_id=" + str(account_info[0]) + ";")
+        cursor.execute("UPDATE users SET is_admin=0 WHERE id='" + user_id + str(msg.from_id[0]) + "';")
         conn.commit()
-        self.__send(msg.from_id, "You are disconnected from the account '" + account_info[1] + "'.", to_chat=False)
-        if account_info[3] == 1:
-            cursor.execute("DELETE FROM accounts WHERE account_id=" + str(account_info[0]) + ";")
-            cursor.execute("DELETE FROM names WHERE name='" + str(account_info[1]) + "';")
-            conn.commit()
-            self.__send(msg.from_id, "Account '" + account_info[1] + "' has been deleted.", to_chat=False)
+        self.__send(msg.from_id, "The account with id '" + user_id + "' no longer has administrative rights.")
 
     def __compute_command_rename(self, msg):
-        if not self.__is_login(msg):
-            return self.__send(msg.from_id, "Error: Your account has not been logged in.", to_chat=False)
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
 
-        command = msg.text.split()
+        command = msg.get_chat_command().split()
         if len(command) == 1:
-            return self.__send(msg.from_id, "Error: To rename an account, you need to provide an new account name.", to_chat=False)
-        name = " ".join(command[1:])
+            return self.__send(msg.from_id, "Error: An user id is required.")
+        if len(command) == 2:
+            return self.__send(msg.from_id, "Error: A new name is required.")
+        user_id = command[1]
+        if user_id == "self":
+            user_id = msg.get_author_id()
+        name = " ".join(command[2:])
+        self.__add_user(user_id + str(msg.from_id[0]))
 
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        user_info = cursor.fetchone()
-        cursor.execute("SELECT * FROM names WHERE name='" + name + "';")
-        if cursor.fetchone() is not None:
-            return self.__send(msg.from_id, "Error: An account with the name '" + name + "' already exists.", to_chat=False)
-        cursor.execute("SELECT * FROM accounts WHERE account_id=" + str(user_info[1]) + ";")
-        account_info = cursor.fetchone()
+        cursor.execute("SELECT * FROM users WHERE id='" + user_id + str(msg.from_id[0]) + "';")
+        if user_id != msg.get_author_id() and cursor.fetchone()[2]:
+            return self.__send(msg.from_id, "Error: Forbidden to rename administrators.")
 
-        cursor.execute("UPDATE names SET name='" + name + "' WHERE name='" + account_info[1] + "';")
-        cursor.execute("UPDATE accounts SET name='" + name + "' WHERE account_id=" + str(account_info[0]) + ";")
+        cursor.execute("UPDATE users SET name='" + name + "' WHERE id='" + user_id + str(msg.from_id[0]) + "';")
         conn.commit()
-        self.__send(msg.from_id, "The account name has been changed from '" + account_info[1] + "' to '" + name + "'.", to_chat=False)
+        self.__send(msg.from_id, "The account name has been changed to '" + name + "'.")
 
-    def __compute_command_get_token(self, msg):
-        if not self.__is_login(msg):
-            return self.__send(msg.from_id, "Error: Your account has not been logged in.", to_chat=False)
+    def __compute_command_set_rule(self, msg):
+        if not self.__is_admin(msg):
+            return self.__send(msg.from_id, "Error: You must be an administrator to use this command.")
+
+        command = msg.get_chat_command()
+        if len(command.split()) == 2 or command.count("\"") < 2:
+            return self.__send(msg.from_id, "Error: A new rule is required.")
+        rule = command[command.find("\"") + 1:command.rfind("\"")]
 
         conn = sqlite3.connect(self.users_information_db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        user_info = cursor.fetchone()
-
-        token = self.__create_token()
-        cursor.execute("UPDATE accounts SET token='" + hashlib.sha512(token.encode()).hexdigest() + "' WHERE account_id=" + str(user_info[1]) + ";")
+        cursor.execute("UPDATE chat_rules SET rule='" + rule + "' WHERE id='" + msg.get_chat_id() + "';")
         conn.commit()
-        self.__send(msg.from_id, "Token to connect to the account: " + token, to_chat=False)
-
-    def __compute_command_delete_token(self, msg):
-        if not self.__is_login(msg):
-            return self.__send(msg.from_id, "Error: Your account has not been logged in.", to_chat=False)
-
-        conn = sqlite3.connect(self.users_information_db_name)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id='" + msg.get_author_id() + "';")
-        user_info = cursor.fetchone()
-
-        cursor.execute("UPDATE accounts SET token='?' WHERE account_id=" + str(user_info[1]) + ";")
-        conn.commit()
-        self.__send(msg.from_id, "The token for connecting to the account has been deleted.", to_chat=False)
+        self.graph.set_rule(msg.get_chat_id(), rule)
+        self.__send(msg.from_id, "The chat rule has been changed to '" + rule + "'.")
 
     def __compute_chat_command(self, msg):
-        command = msg.get_chat_command()
-        if command == "select":
+        command = msg.get_chat_command().split()
+        if len(command) >= 1 and command[0].lower() == "select":
             self.__compute_command_select(msg)
-        elif command == "connect":
+        elif len(command) >= 1 and command[0].lower() == "orient":
+            self.__compute_command_orient(msg)
+        elif len(command) >= 1 and command[0].lower() == "connect":
             self.__compute_command_connect(msg)
-        elif command == "disconnect":
+        elif len(command) >= 1 and command[0].lower() == "disconnect":
             self.__compute_command_disconnect(msg)
+        elif len(command) >= 2 and command[0].lower() == "set" and command[1].lower() == "admin":
+            self.__compute_command_set_admin(msg)
+        elif len(command) >= 2 and command[0].lower() == "delete" and command[1].lower() == "admin":
+            self.__compute_command_delete_admin(msg)
+        elif len(command) >= 2 and command[0].lower() == "get" and command[1].lower() == "id":
+            self.__compute_command_get_id(msg)
+        elif len(command) >= 1 and command[0].lower() == "rename":
+            self.__compute_command_rename(msg)
+        elif len(command) >= 2 and command[0].lower() == "set" and command[1].lower() == "rule":
+            self.__compute_command_set_rule(msg)
         else:
             self.__send(msg.from_id, "Error: Unknown instruction.")
 
     def __compute_user_command(self, msg):
-        self.__add_user(msg)
         command = msg.text.split()
-        if len(command) >= 1 and command[0].lower() == "create":
-            self.__compute_command_create(msg)
-        elif len(command) >= 1 and command[0].lower() == "login":
-            self.__compute_command_login(msg)
-        elif len(command) >= 1 and command[0].lower() == "logout":
-            self.__compute_command_logout(msg)
-        elif len(command) >= 1 and command[0].lower() == "rename":
-            self.__compute_command_rename(msg)
-        elif len(command) >= 2 and command[0].lower() == "get" and command[1].lower() == "token":
-            self.__compute_command_get_token(msg)
-        elif len(command) >= 2 and command[0].lower() == "delete" and command[1].lower() == "token":
-            self.__compute_command_delete_token(msg)
+        if len(command) >= 2 and command[0].lower() == "get" and command[1].lower() == "id":
+            self.__compute_command_get_id(msg)
         else:
             self.__send(msg.from_id, "Error: Unknown instruction.", to_chat=False)
 
@@ -283,20 +241,18 @@ class UsersHandler:
             self.discord_client.run(discord_token)
 
     def compute_message(self, msg):
-        if msg.text == "":
-            return None
-
         if msg.chat_name is None:
-            thread = threading.Thread(target=self.__compute_user_command, args=(msg, ))
-            thread.start()
-            return None
+            return self.__compute_user_command(msg)
 
+        self.__add_user(msg.get_author_id() + str(msg.from_id[0]))
         self.graph.add_vertex(msg.from_id)
         if msg.is_chat_command():
             return self.__compute_chat_command(msg)
 
         name = self.__get_user_name(msg)
-        if name is not None:
+        if name != "None":
             msg.author_name = name
-        for send_id in self.graph.get_reachable_vertices(msg.from_id):
-            self.__send(send_id, msg.get_text_to_forwarding())
+
+        text, photo = msg.get_content_to_forwarding()
+        for send_id in self.graph.get_reachable_vertices(msg.from_id, msg.text):
+            self.__send(send_id, text, photo=photo)
